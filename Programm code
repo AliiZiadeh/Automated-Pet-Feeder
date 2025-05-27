@@ -1,0 +1,209 @@
+
+unsigned int angle;
+unsigned char HL;
+unsigned int Mcntr;
+unsigned int timerCount = 0;
+
+unsigned char lastTouchState = 0;
+unsigned char currentTouchState = 0;
+unsigned char triggered = 0;
+unsigned char sequenceRunning = 0;
+unsigned long sequenceStart = 0;
+
+unsigned int adcValue;
+
+
+void myDelay(unsigned int x);
+void interrupt(void);
+void init_ADC(void);
+unsigned int read_ADC(void);
+void startMotorServoBuzzer(void);
+void continueMotorServoBuzzer(void);
+
+void main() {
+
+    TRISA = 0x01;
+    TRISB = 0x00;
+    TRISC = 0x00;
+    TRISC |= 0x40;
+    PORTA = 0;
+    PORTB = 0;
+    PORTC = 0;
+
+
+    init_ADC();
+
+
+    TMR1H = 0;
+    TMR1L = 0;
+    TMR0 = 248;
+    HL = 1;
+    angle = 2000;
+
+    CCP1CON = 0x08;
+    OPTION_REG = 0x87;
+    T1CON = 0x01;
+    INTCON = 0xF0;
+    PIE1 |= 0x04;
+
+    CCPR1H = angle >> 8;
+    CCPR1L = angle;
+
+    while (1) {
+        // IR Sensor Handling
+        adcValue = read_ADC();
+        if (adcValue < 270) {
+            PORTB |= 0x20;   // Green LED ON (RB5)
+            PORTB &= ~0x10;  // Red LED OFF (RB4)
+        } else {
+            PORTB |= 0x10;   // Red LED ON (RB4)
+            PORTB &= ~0x20;  // Green LED OFF (RB5)
+        }
+
+        // Touch detection
+        currentTouchState = (PORTC & 0x40) ? 1 : 0;
+        if (currentTouchState == 1 && lastTouchState == 0 && !sequenceRunning) {
+            startMotorServoBuzzer();
+        }
+        lastTouchState = currentTouchState;
+
+        if (sequenceRunning) {
+            continueMotorServoBuzzer();
+        }
+    }
+}
+
+void startMotorServoBuzzer() {
+    sequenceRunning = 1;
+    sequenceStart = timerCount;
+    angle = 1200;                 // Open servo
+    PORTC |= 0x28;                // RC3 (motor), RC5 (buzzer)
+    PORTC &= ~0x10;               // RC4 LOW
+}
+
+void continueMotorServoBuzzer() {
+    unsigned int elapsed = timerCount - sequenceStart;
+
+    if (elapsed == 5) {
+        angle = 2800;             // Close servo after 5 sec
+    }
+    if (elapsed >= 10) {
+        PORTC &= ~0x38;           // Stop motor and buzzer (RC3, RC4, RC5 LOW)
+        sequenceRunning = 0;
+    }
+}
+
+
+void interrupt(void) {
+    if (INTCON & 0x04) {  // Timer0 overflow
+        TMR0 = 248;
+        Mcntr++;
+        timerCount++;
+        INTCON &= ~0x04;
+    }
+
+    if (PIR1 & 0x04) {  // CCP1
+        if (HL) {
+            CCPR1H = angle >> 8;
+            CCPR1L = angle;
+            CCP1CON = 0x09;
+            HL = 0;
+        } else {
+            CCPR1H = (40000 - angle) >> 8;
+            CCPR1L = (40000 - angle);
+            CCP1CON = 0x08;
+            HL = 1;
+        }
+        TMR1H = 0;
+        TMR1L = 0;
+        PIR1 &= ~0x04;
+    }
+}
+
+// Delay using TMR0 counter
+void myDelay(unsigned int x) {
+    Mcntr = 0;
+    while (Mcntr < x);
+}
+
+// ADC init
+void init_ADC(void) {
+    ADCON0 = 0x41; // Channel 0, ADC ON
+    ADCON1 = 0xCE; // AN0 analog, right justified
+}
+
+// ADC read
+unsigned int read_ADC(void) {
+    ADCON0 |= 0x04;                 // GO
+    while (ADCON0 & 0x04);
+    return ((ADRESH << 8) | ADRESL);
+}
+/*// === Fan PWM Init (RC1 / CCP2) ===
+void initPWM(void) {
+    TRISC &= ~0x02;    // RC1 output
+    PR2 = 255;
+    CCP2CON = 0x0C;    // PWM mode
+    CCPR2L = 0;
+    T2CON = 0x04;      // Timer2 ON
+}
+
+void setFanSpeed(unsigned char duty) {
+    CCPR2L = duty;
+}
+
+// === Fan Ramp-Up ===
+void fanRampUp(unsigned char targetDuty) {
+    unsigned char currentDuty = 0;
+    PORTC |= FAN_DIR_MASK;
+
+    while (currentDuty < targetDuty) {
+        currentDuty += 5;
+        if (currentDuty > targetDuty) currentDuty = targetDuty;
+        setFanSpeed(currentDuty);
+        msDelay(50);
+    }
+}
+
+// === Fan Ramp-Down ===
+void fanRampDown() {
+    unsigned char currentDuty = CCPR2L;
+
+    while (currentDuty > 0) {
+        if (currentDuty < 5)
+            currentDuty = 0;
+        else
+            currentDuty -= 5;
+        setFanSpeed(currentDuty);
+        msDelay(50);
+    }
+
+    PORTC &= ~FAN_DIR_MASK;
+    setFanSpeed(0);
+}
+
+// Ultrasonic distance measurement with timeout
+unsigned int readUltrasonic(void) {
+    unsigned int pulseTime = 0;
+    unsigned int timeout = 30000;
+
+    PORTA |= TRIG_PIN;      // TRIG high
+    delay_u(10);
+    PORTA &= ~TRIG_PIN;     // TRIG low
+
+    // Wait for ECHO high or timeout
+    while (!(PORTA & ECHO_PIN)) {
+        if (--timeout == 0) return 0;
+    }
+
+    timeout = 30000;
+
+    while ((PORTA & ECHO_PIN)) {
+        pulseTime++;
+        delay_u(10);
+        if (--timeout == 0) break;
+    }
+
+    // Distance (cm) calculation (no floats)
+    return (pulseTime * 1715) / 10000;
+}
+
